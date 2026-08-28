@@ -1,0 +1,13 @@
+# 构建缓存与临时文件
+.build/
+__pycache__/
+*.pyc
+
+# 构建产物（运行 apply-config.py 自动生成，不入库）
+GCPLAYERGLOBALS.GLOBAL.MBIN
+GCGAMEPLAYGLOBALS.GLOBAL.MBIN
+METADATA/REALITY/TABLES/NMS_REALITY_GCTECHNOLOGYTABLE.MBIN
+
+# 系统文件
+Thumbs.db
+Desktop.ini
