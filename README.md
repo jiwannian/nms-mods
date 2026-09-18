@@ -9,6 +9,7 @@
 | 目录 | 功能 | 游戏内文件夹 |
 | --- | --- | --- |
 | [`instantmine/`](instantmine/) | 采矿激光瞬间采集，几乎不过热 | `zhanh_InstantMine` |
+| [`unlimitedstacks/`](unlimitedstacks/) | 可堆叠物质/产品堆叠上限接近无限 | `zhanh_UnlimitedStacks` |
 
 以后新增的 mod 会继续以同级子目录加入。
 
@@ -27,7 +28,7 @@ MBINCompiler 必须与当前游戏大版本对齐（例如 7.03 用 `v7.03.x`）
 
 进入某个 mod 目录，运行其中的 `apply-config.ps1`（或 `python apply-config.py`）。脚本会：
 
-1. 从本机游戏 `NMSARC.globals.pak` / `NMSARC.Precache.pak` 提取当前版本原始 MBIN；
+1. 从本机游戏 PAK（`NMSARC.globals.pak` / `NMSARC.Precache.pak` / `NMSARC.MetadataEtc.pak`）提取当前版本原始 MBIN；
 2. 只改该 mod 声明且当前版本真实存在的字段；
 3. 编译后安装到 `GAMEDATA\MODS\<mod名>\`。
 
@@ -38,6 +39,11 @@ MBINCompiler 必须与当前游戏大版本对齐（例如 7.03 用 `v7.03.x`）
 ```
 ├── README.md              # 本文件，集合总览
 ├── instantmine/           # 瞬间采集
+│   ├── apply-config.py
+│   ├── apply-config.ps1
+│   ├── CONFIG.ini
+│   └── README.md
+├── unlimitedstacks/       # 无限堆叠
 │   ├── apply-config.py
 │   ├── apply-config.ps1
 │   ├── CONFIG.ini
