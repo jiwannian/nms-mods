@@ -25,11 +25,13 @@ DIFFICULTY_LEVELS = ("High", "Normal", "Low")
 HARD_LIMIT_FIELDS = ("SubstanceStackLimit", "ProductStackLimit")
 STACK_TABLES = ("MaxSubstanceStackSizes", "MaxProductStackSizes")
 
-# 引擎用有符号 int32。各背包上限会再乘物品 StackMultiplier。
-# Cosmos 7.03 产品表最大 multiplier=1000（离子电池=20）。
+# 引擎用有符号 int32。建造/配方 UI 会做 硬顶 × StackMultiplier。
+# 物质最大 multiplier=10；离子电池=20。99999999×20 仍在 int32 内。
 INT32_MAX = 2147483647
-MAX_STACK_MULTIPLIER = 1000
-SAFE_STACK_CAP = INT32_MAX // MAX_STACK_MULTIPLIER  # 2147483
+MAX_SUBSTANCE_MULTIPLIER = 10
+MAX_PRODUCT_UI_MULTIPLIER = 20  # POWERCELL；弹药 1000 不走这条
+SAFE_SUBSTANCE_CAP = INT32_MAX // MAX_SUBSTANCE_MULTIPLIER  # 214748364
+SAFE_PRODUCT_CAP = INT32_MAX // MAX_PRODUCT_UI_MULTIPLIER  # 107374182
 
 
 def cfg_get(cfg: configparser.ConfigParser, section: str, key: str, default: str) -> str:
@@ -43,19 +45,16 @@ def cfg_bool(cfg: configparser.ConfigParser, section: str, key: str, default: bo
     return raw in ("1", "true", "yes", "on")
 
 
-def sanitize_stack_limit(raw: str, report: list[str]) -> str:
+def sanitize_stack_limit(raw: str, report: list[str], *, cap: int, label: str) -> str:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise ValueError(f"StackLimit 必须是整数，实际为 {raw!r}") from exc
+        raise ValueError(f"{label} 必须是整数，实际为 {raw!r}") from exc
     if value < 1:
-        raise ValueError(f"StackLimit 必须 >= 1，实际为 {value}")
-    if value > SAFE_STACK_CAP:
-        report.append(
-            f"StackLimit={value} 乘 StackMultiplier（最大 {MAX_STACK_MULTIPLIER}）会溢出 int32，"
-            f"已钳到 {SAFE_STACK_CAP}"
-        )
-        value = SAFE_STACK_CAP
+        raise ValueError(f"{label} 必须 >= 1，实际为 {value}")
+    if value > cap:
+        report.append(f"{label}={value} 乘 StackMultiplier 会溢出 int32，已钳到 {cap}")
+        value = cap
     return str(value)
 
 
@@ -176,17 +175,20 @@ def build_difficulty_config(cfg: configparser.ConfigParser, report: list[str]) -
         raise KeyError("当前游戏版本缺少 InventoryStackLimitsOptionData")
 
     substance_raw = cfg_get(cfg, "Stacks", "SubstanceStackLimit", "") or cfg_get(
-        cfg, "Stacks", "StackLimit", "999999"
+        cfg, "Stacks", "StackLimit", "99999999"
     )
-    substance_limit = sanitize_stack_limit(substance_raw, report)
+    substance_limit = sanitize_stack_limit(
+        substance_raw, report, cap=SAFE_SUBSTANCE_CAP, label="SubstanceStackLimit"
+    )
+    product_limit = sanitize_stack_limit(
+        cfg_get(cfg, "Stacks", "ProductStackLimit", substance_limit),
+        report,
+        cap=SAFE_PRODUCT_CAP,
+        label="ProductStackLimit",
+    )
     keep_vanilla_products = cfg_bool(cfg, "Stacks", "KeepVanillaProducts", True)
     keep_popup = cfg_bool(cfg, "Stacks", "KeepUIPopup", True)
     skip_product = {"UIPopup"} if keep_popup else set()
-    product_limit = ""
-    if not keep_vanilla_products:
-        product_limit = sanitize_stack_limit(
-            cfg_get(cfg, "Stacks", "ProductStackLimit", substance_limit), report
-        )
 
     report.append("== DIFFICULTYCONFIG.InventoryStackLimitsOptionData ==")
     for level in DIFFICULTY_LEVELS:
@@ -197,10 +199,10 @@ def build_difficulty_config(cfg: configparser.ConfigParser, report: list[str]) -
         prefix = level
         set_value(block, "SubstanceStackLimit", substance_limit, report, prefix)
         fill_stack_table(block, "MaxSubstanceStackSizes", substance_limit, report, prefix, set())
-        if keep_vanilla_products:
-            report.append(f"保留 {prefix} 产品堆叠为原版（发射燃料/离子电池充能不受影响）")
-            continue
         set_value(block, "ProductStackLimit", product_limit, report, prefix)
+        if keep_vanilla_products:
+            report.append(f"保留 {prefix} 产品各背包格子为原版（只改硬顶，避免燃料拆格）")
+            continue
         fill_stack_table(block, "MaxProductStackSizes", product_limit, report, prefix, skip_product)
 
     write_xml(tree, mxml)
