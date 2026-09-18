@@ -9,7 +9,7 @@
 | 目录 | 功能 | 游戏内文件夹 |
 | --- | --- | --- |
 | [`instantmine/`](instantmine/) | 采矿激光瞬间采集，几乎不过热 | `zhanh_InstantMine` |
-| [`unlimitedstacks/`](unlimitedstacks/) | 可堆叠物质/产品堆叠上限接近无限 | `zhanh_UnlimitedStacks` |
+| [`unlimitedstacks/`](unlimitedstacks/) | 可堆叠物质上限接近无限；产品保持原版以免充能/配方溢出 | `zhanh_UnlimitedStacks` |
 
 以后新增的 mod 会继续以同级子目录加入。
 
