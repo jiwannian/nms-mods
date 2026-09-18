@@ -42,6 +42,7 @@ MINING_TECH_STATS = {
     "UT_MINER": ("Weapon_Laser_MiningBonus",),
     "VEHICLE_LASER": ("Vehicle_LaserDamage", "Vehicle_LaserHeatTime"),
     "SUB_LASER": ("Vehicle_LaserDamage", "Vehicle_LaserHeatTime"),
+    "MECH_LASER": ("Vehicle_LaserDamage", "Vehicle_LaserHeatTime"),
 }
 
 
@@ -190,11 +191,10 @@ def build_gameplay_globals(cfg: configparser.ConfigParser, report: list[str]) ->
     )
     tree = ET.parse(mxml)
     root = tree.getroot()
-    heat = cfg_get(cfg, "Mining", "LaserHeatTime", "9999")
+    # 只改采矿激光基础过热时间。HeatAlertTime / HeatDamageBoost 是全局过热条，
+    # 动了会让脉冲枪等武器的过热提示和过热加成一起坏掉。
     values = {
-        "BaseLaserHeatTime": heat,
-        "HeatAlertTime": heat,
-        "HeatDamageBoost": "0",
+        "BaseLaserHeatTime": cfg_get(cfg, "Mining", "LaserHeatTime", "9999"),
     }
     report.append("== GCGAMEPLAYGLOBALS ==")
     for name, value in values.items():
