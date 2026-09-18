@@ -18,6 +18,8 @@ Waypoint 之后堆叠不再写在 `DEFAULTINVENTORYBALANCE`，而在：
 
 单件 `StackMultiplier` 仍生效：原版能堆 10 的产品会变成 `10 × StackMultiplier` 再被硬顶截断。原版堆 1 的弹窗格子保持 1。
 
+引擎用有符号 int32。各背包上限会再乘 `StackMultiplier`（离子电池=20，个别产品=1000）。乘完必须 ≤ 2147483647，否则 UI 会显示负数（`999999999 × 20 = -1474836500`）。构建脚本会把过大的 `StackLimit` 钳到 `2147483`。
+
 ## 安装
 
 1. 确认本机 `HGPAKtool`、`MBINCompiler` 路径与 `apply-config.py` 顶部一致。
@@ -34,7 +36,7 @@ Waypoint 之后堆叠不再写在 `DEFAULTINVENTORYBALANCE`，而在：
 
 | 项 | 作用 | 默认 |
 | --- | --- | --- |
-| `StackLimit` | 物质/产品硬顶和各背包上限 | 999999999 |
+| `StackLimit` | 物质/产品硬顶和各背包上限 | 999999 |
 | `KeepUIPopup` | 是否保留拾取弹窗产品上限为 1 | true |
 
 ## 卸载

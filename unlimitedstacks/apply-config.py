@@ -25,6 +25,12 @@ DIFFICULTY_LEVELS = ("High", "Normal", "Low")
 HARD_LIMIT_FIELDS = ("SubstanceStackLimit", "ProductStackLimit")
 STACK_TABLES = ("MaxSubstanceStackSizes", "MaxProductStackSizes")
 
+# 引擎用有符号 int32。各背包上限会再乘物品 StackMultiplier。
+# Cosmos 7.03 产品表最大 multiplier=1000（离子电池=20）。
+INT32_MAX = 2147483647
+MAX_STACK_MULTIPLIER = 1000
+SAFE_STACK_CAP = INT32_MAX // MAX_STACK_MULTIPLIER  # 2147483
+
 
 def cfg_get(cfg: configparser.ConfigParser, section: str, key: str, default: str) -> str:
     if cfg.has_option(section, key):
@@ -35,6 +41,22 @@ def cfg_get(cfg: configparser.ConfigParser, section: str, key: str, default: str
 def cfg_bool(cfg: configparser.ConfigParser, section: str, key: str, default: bool) -> bool:
     raw = cfg_get(cfg, section, key, "true" if default else "false").lower()
     return raw in ("1", "true", "yes", "on")
+
+
+def sanitize_stack_limit(raw: str, report: list[str]) -> str:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"StackLimit 必须是整数，实际为 {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"StackLimit 必须 >= 1，实际为 {value}")
+    if value > SAFE_STACK_CAP:
+        report.append(
+            f"StackLimit={value} 乘 StackMultiplier（最大 {MAX_STACK_MULTIPLIER}）会溢出 int32，"
+            f"已钳到 {SAFE_STACK_CAP}"
+        )
+        value = SAFE_STACK_CAP
+    return str(value)
 
 
 def run_checked(args: list[str | Path], cwd: Path | None = None) -> None:
@@ -153,7 +175,7 @@ def build_difficulty_config(cfg: configparser.ConfigParser, report: list[str]) -
     if option_data is None:
         raise KeyError("当前游戏版本缺少 InventoryStackLimitsOptionData")
 
-    stack_limit = cfg_get(cfg, "Stacks", "StackLimit", "999999999")
+    stack_limit = sanitize_stack_limit(cfg_get(cfg, "Stacks", "StackLimit", "999999"), report)
     keep_popup = cfg_bool(cfg, "Stacks", "KeepUIPopup", True)
     skip_product = {"UIPopup"} if keep_popup else set()
 
