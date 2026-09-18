@@ -175,9 +175,18 @@ def build_difficulty_config(cfg: configparser.ConfigParser, report: list[str]) -
     if option_data is None:
         raise KeyError("当前游戏版本缺少 InventoryStackLimitsOptionData")
 
-    stack_limit = sanitize_stack_limit(cfg_get(cfg, "Stacks", "StackLimit", "999999"), report)
+    substance_raw = cfg_get(cfg, "Stacks", "SubstanceStackLimit", "") or cfg_get(
+        cfg, "Stacks", "StackLimit", "999999"
+    )
+    substance_limit = sanitize_stack_limit(substance_raw, report)
+    keep_vanilla_products = cfg_bool(cfg, "Stacks", "KeepVanillaProducts", True)
     keep_popup = cfg_bool(cfg, "Stacks", "KeepUIPopup", True)
     skip_product = {"UIPopup"} if keep_popup else set()
+    product_limit = ""
+    if not keep_vanilla_products:
+        product_limit = sanitize_stack_limit(
+            cfg_get(cfg, "Stacks", "ProductStackLimit", substance_limit), report
+        )
 
     report.append("== DIFFICULTYCONFIG.InventoryStackLimitsOptionData ==")
     for level in DIFFICULTY_LEVELS:
@@ -186,10 +195,13 @@ def build_difficulty_config(cfg: configparser.ConfigParser, report: list[str]) -
             report.append(f"跳过缺失难度档 {level}")
             continue
         prefix = level
-        for field in HARD_LIMIT_FIELDS:
-            set_value(block, field, stack_limit, report, prefix)
-        fill_stack_table(block, "MaxSubstanceStackSizes", stack_limit, report, prefix, set())
-        fill_stack_table(block, "MaxProductStackSizes", stack_limit, report, prefix, skip_product)
+        set_value(block, "SubstanceStackLimit", substance_limit, report, prefix)
+        fill_stack_table(block, "MaxSubstanceStackSizes", substance_limit, report, prefix, set())
+        if keep_vanilla_products:
+            report.append(f"保留 {prefix} 产品堆叠为原版（发射燃料/离子电池充能不受影响）")
+            continue
+        set_value(block, "ProductStackLimit", product_limit, report, prefix)
+        fill_stack_table(block, "MaxProductStackSizes", product_limit, report, prefix, skip_product)
 
     write_xml(tree, mxml)
     output = ROOT / "METADATA" / "GAMESTATE" / "DIFFICULTYCONFIG.MBIN"

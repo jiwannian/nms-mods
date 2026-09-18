@@ -1,6 +1,6 @@
 # 无限堆叠
 
-把**已经可堆叠**的物质和产品堆叠上限拉到接近无限。不改科技槽，不把不可堆叠的安装件变成可堆叠。
+把**已经可堆叠的物质**（矿、气、尘等）堆叠上限拉到接近无限。产品（发射燃料、离子电池、金属镀层等）默认保持原版堆叠，避免充能物品坏掉。不改科技槽，不把不可堆叠的安装件变成可堆叠。
 
 适配 NMS 5.50+ 难度配置结构，已在 **Cosmos 7.03** 上按当前字段重建。
 
@@ -10,15 +10,14 @@ Waypoint 之后堆叠不再写在 `DEFAULTINVENTORYBALANCE`，而在：
 
 `METADATA/GAMESTATE/DIFFICULTYCONFIG.MBIN` → `InventoryStackLimitsOptionData`
 
-对 High / Normal / Low 三档全部改写：
+对 High / Normal / Low 三档改写：
 
-- `SubstanceStackLimit` / `ProductStackLimit`（硬顶，原版 9999）
-- `MaxSubstanceStackSizes`（各背包物质上限）
-- `MaxProductStackSizes`（各背包产品上限；默认保留 `UIPopup=1`）
+- `SubstanceStackLimit` 和 `MaxSubstanceStackSizes`（物质无限）
+- 默认不改 `ProductStackLimit` / `MaxProductStackSizes`
 
-单件 `StackMultiplier` 仍生效：原版能堆 10 的产品会变成 `10 × StackMultiplier` 再被硬顶截断。原版堆 1 的弹窗格子保持 1。
+发射燃料 `LAUNCHFUEL`：`StackMultiplier=4`，`ChargeValue=400`；发射推进器 `ChargeAmount=200`。原版 1 罐充满。若把各背包产品上限拉到极大，制作 1 罐会拆成多格，充能只加 25%。
 
-引擎用有符号 int32。各背包上限会再乘 `StackMultiplier`（离子电池=20，个别产品=1000）。乘完必须 ≤ 2147483647，否则 UI 会显示负数（`999999999 × 20 = -1474836500`）。构建脚本会把过大的 `StackLimit` 钳到 `2147483`。
+引擎用有符号 int32。各背包上限会再乘 `StackMultiplier`（离子电池=20，个别产品=1000）。乘完必须 ≤ 2147483647，否则 UI 会显示负数。构建脚本会把过大的物质上限钳到 `2147483`。
 
 ## 安装
 
@@ -36,8 +35,10 @@ Waypoint 之后堆叠不再写在 `DEFAULTINVENTORYBALANCE`，而在：
 
 | 项 | 作用 | 默认 |
 | --- | --- | --- |
-| `StackLimit` | 物质/产品硬顶和各背包上限 | 999999 |
-| `KeepUIPopup` | 是否保留拾取弹窗产品上限为 1 | true |
+| `SubstanceStackLimit` | 物质硬顶和各背包物质上限 | 999999 |
+| `KeepVanillaProducts` | 产品保持原版（修复发射燃料充能） | true |
+| `ProductStackLimit` | 仅当 `KeepVanillaProducts=false` 时改产品上限 | 999999 |
+| `KeepUIPopup` | 改产品时是否保留拾取弹窗上限为 1 | true |
 
 ## 卸载
 
