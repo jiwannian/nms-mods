@@ -2,7 +2,6 @@
 .build/
 __pycache__/
 *.pyc
-**/instantmine_toggle.cache.json
 
 # 各 mod 构建产物（运行 apply-config.py 自动生成，不入库）
 **/GCPLAYERGLOBALS.GLOBAL.MBIN

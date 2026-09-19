@@ -240,18 +240,8 @@ def build_gameplay_globals(cfg: configparser.ConfigParser, report: list[str]) ->
     return output
 
 
-VEHICLE_DAMAGE_KEYS = {
-    "VEHICLE_LASER": ("VehicleLaserDamage", "999701"),
-    "SUB_LASER": ("SubLaserDamage", "999702"),
-    "MECH_LASER": ("MechLaserDamage", "999703"),
-}
-
-
-def mining_value_for_stat(cfg: configparser.ConfigParser, stat_type: str, tech_id: str = "") -> str:
-    if stat_type == "Vehicle_LaserDamage":
-        key, default = VEHICLE_DAMAGE_KEYS.get(tech_id, ("LaserDamageBonus", "999999"))
-        return cfg_get(cfg, "Mining", key, default)
-    if stat_type == "Weapon_Laser_Damage":
+def mining_value_for_stat(cfg: configparser.ConfigParser, stat_type: str) -> str:
+    if stat_type in ("Weapon_Laser_Damage", "Vehicle_LaserDamage"):
         return cfg_get(cfg, "Mining", "LaserDamageBonus", "999999")
     if stat_type == "Weapon_Laser_Mining_Speed":
         return cfg_get(cfg, "Mining", "LaserMiningSpeed", "0.01")
@@ -277,7 +267,7 @@ def build_technology_table(cfg: configparser.ConfigParser, report: list[str]) ->
             report.append(f"跳过缺失科技 {tech_id}")
             continue
         for stat_type in stats:
-            value = mining_value_for_stat(cfg, stat_type, tech_id)
+            value = mining_value_for_stat(cfg, stat_type)
             if tech_id == "UT_MINER" and stat_type == "Weapon_Laser_MiningBonus":
                 value = cfg_get(cfg, "Mining", "AdvancedLaserMiningBonus", "20")
             set_stat_bonus(technology, stat_type, value, report)
@@ -313,16 +303,7 @@ def copy_into_game(files: list[Path]) -> None:
         target = GAME_MOD / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target)
-    for extra in (
-        "CONFIG.ini",
-        "apply-config.py",
-        "apply-config.ps1",
-        "README.md",
-        "instantmine_toggle.py",
-        "InstantMineToggle.ahk",
-        "Start-InstantMineToggle.cmd",
-        "Start-InstantMineToggle.ps1",
-    ):
+    for extra in ("CONFIG.ini", "apply-config.py", "apply-config.ps1", "README.md"):
         src = ROOT / extra
         if src.exists():
             shutil.copy2(src, GAME_MOD / extra)
