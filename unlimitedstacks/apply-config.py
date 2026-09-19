@@ -211,7 +211,19 @@ def build_difficulty_config(cfg: configparser.ConfigParser, report: list[str]) -
     return output
 
 
+def assert_game_not_running() -> None:
+    completed = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq NMS.exe", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if "NMS.exe" in (completed.stdout or ""):
+        raise RuntimeError("NMS.exe 正在运行。先完全退出游戏再构建，否则会拆掉正在用的 MBIN 导致崩溃。")
+
+
 def copy_into_game(files: list[Path]) -> None:
+    assert_game_not_running()
     if GAME_MOD.exists():
         shutil.rmtree(GAME_MOD)
     GAME_MOD.mkdir(parents=True, exist_ok=True)
@@ -220,10 +232,6 @@ def copy_into_game(files: list[Path]) -> None:
         target = GAME_MOD / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target)
-    for extra in ("CONFIG.ini", "apply-config.py", "apply-config.ps1", "README.md"):
-        src = ROOT / extra
-        if src.exists():
-            shutil.copy2(src, GAME_MOD / extra)
     expected = [GAME_MOD / "METADATA" / "GAMESTATE" / "DIFFICULTYCONFIG.MBIN"]
     missing = [str(path) for path in expected if not path.exists()]
     if missing:
