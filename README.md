@@ -8,7 +8,7 @@
 
 | 目录 | 功能 | 游戏内文件夹 |
 | --- | --- | --- |
-| [`instantmine/`](instantmine/) | 采矿激光瞬间采集；构建会合并武器不过热 | `zhanh_InstantMine` |
+| [`instantmine/`](instantmine/) | 采矿激光瞬间采集；构建会合并武器不过热。游戏内 F8 开关 | `zhanh_InstantMine` |
 | [`unlimitedstacks/`](unlimitedstacks/) | 物质堆叠 99999999；产品格子原版，硬顶 99999999 以免建造 UI 溢出 | `zhanh_UnlimitedStacks` |
 | [`nooverheat/`](nooverheat/) | 手持/载具/飞船武器不过热。已装瞬间采集时跳过重复 MBIN | `zhanh_NoOverheat` |
 
