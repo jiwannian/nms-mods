@@ -21,7 +21,12 @@ PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_RIGHTS = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION
 MEM_COMMIT = 0x1000
 PAGE_GUARD = 0x100
+PAGE_NOACCESS = 0x01
 WRITABLE = 0x04 | 0x08 | 0x40 | 0x80
+READABLE = WRITABLE | 0x02 | 0x20 | 0x10
+CHUNK = 2 * 1024 * 1024
+CHUNK_OVERLAP = 64
+PAGE_READWRITE = 0x04
 
 STAT_LASER_DAMAGE = 2
 STAT_MINING_SPEED = 3
@@ -52,6 +57,10 @@ kernel32.WriteProcessMemory.argtypes = [
 ]
 kernel32.VirtualQueryEx.restype = ctypes.c_size_t
 kernel32.VirtualQueryEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+kernel32.VirtualProtectEx.restype = wintypes.BOOL
+kernel32.VirtualProtectEx.argtypes = [
+    wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+]
 kernel32.CloseHandle.restype = wintypes.BOOL
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
@@ -183,6 +192,14 @@ def write_float(handle: int, addr: int, value: float) -> bool:
     buf = pack_f(value)
     written = ctypes.c_size_t()
     ok = kernel32.WriteProcessMemory(handle, ctypes.c_void_p(addr), buf, 4, ctypes.byref(written))
+    if ok and written.value == 4:
+        return True
+    old = wintypes.DWORD()
+    if not kernel32.VirtualProtectEx(handle, ctypes.c_void_p(addr), 4, PAGE_READWRITE, ctypes.byref(old)):
+        return False
+    written = ctypes.c_size_t()
+    ok = kernel32.WriteProcessMemory(handle, ctypes.c_void_p(addr), buf, 4, ctypes.byref(written))
+    kernel32.VirtualProtectEx(handle, ctypes.c_void_p(addr), 4, old.value, ctypes.byref(old))
     return bool(ok and written.value == 4)
 
 
@@ -204,68 +221,110 @@ def find_all(blob: bytes, pattern: bytes, base: int) -> list[int]:
         start = pos + 1
 
 
-def scan_writable(handle: int) -> list[tuple[int, bytes]]:
-    chunks: list[tuple[int, bytes]] = []
+def iter_chunks(handle: int):
     mbi = MEMORY_BASIC_INFORMATION()
     address = 0
     while True:
         got = kernel32.VirtualQueryEx(handle, ctypes.c_void_p(address), ctypes.byref(mbi), ctypes.sizeof(mbi))
         if got != ctypes.sizeof(mbi):
             break
-        base = mbi.BaseAddress or 0
+        base = int(mbi.BaseAddress or 0)
         size = int(mbi.RegionSize)
         nxt = base + size
         if nxt <= address:
             break
         address = nxt
-        if mbi.State != MEM_COMMIT or not (mbi.Protect & WRITABLE) or (mbi.Protect & PAGE_GUARD):
+        if mbi.State != MEM_COMMIT or (mbi.Protect & PAGE_GUARD) or (mbi.Protect & PAGE_NOACCESS):
             continue
-        if size > 96 * 1024 * 1024:
+        if not (mbi.Protect & READABLE):
             continue
-        buf = (ctypes.c_char * size)()
-        got_n = ctypes.c_size_t()
-        ok = kernel32.ReadProcessMemory(handle, ctypes.c_void_p(base), buf, size, ctypes.byref(got_n))
-        if not ok or got_n.value < 32:
-            continue
-        chunks.append((base, bytes(buf[: got_n.value])))
-    return chunks
+        off = 0
+        while off < size:
+            nread = min(CHUNK, size - off)
+            buf = (ctypes.c_char * nread)()
+            got_n = ctypes.c_size_t()
+            ok = kernel32.ReadProcessMemory(handle, ctypes.c_void_p(base + off), buf, nread, ctypes.byref(got_n))
+            if ok and got_n.value >= 4:
+                yield base + off, bytes(buf[: got_n.value])
+            if nread < CHUNK:
+                break
+            off += nread - CHUNK_OVERLAP
+
+
+def find_pattern(handle: int, pattern: bytes, limit: int = 32) -> list[int]:
+    hits: list[int] = []
+    if not pattern:
+        return hits
+    seen: set[int] = set()
+    for base, blob in iter_chunks(handle):
+        start = 0
+        while True:
+            pos = blob.find(pattern, start)
+            if pos < 0:
+                break
+            addr = base + pos
+            if addr not in seen:
+                seen.add(addr)
+                hits.append(addr)
+                if len(hits) >= limit:
+                    return hits
+            start = pos + 1
+    return hits
 
 
 def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float]) -> dict[str, int]:
     player_prefix = pack_f(0.04) + pack_f(1.5) + pack_f(1.0)
     player_mid = pack_f(2.0) + pack_f(0.4) + pack_f(0.1)
     heat = pack_bonus(on_vals["heat"], STAT_HEAT_TIME)
-    spd_on = pack_bonus(on_vals["laserSpd"], STAT_MINING_SPEED)
-    spd_off = pack_bonus(off_vals["laserSpd"], STAT_MINING_SPEED)
-    targets: dict[str, int] = {}
-    speed_hits: list[int] = []
-    bonus_hits: dict[str, list[int]] = {k: [] for k in ("veh", "sub", "mech", "advBonus")}
+    player_on = player_prefix + pack_f(on_vals["rate"]) + player_mid + pack_f(on_vals["mult"])
+    player_off = player_prefix + pack_f(off_vals["rate"]) + player_mid + pack_f(off_vals["mult"])
     patterns = {
-        "veh": (pack_bonus(on_vals["veh"], STAT_VEHICLE_DAMAGE), pack_bonus(off_vals["veh"], STAT_VEHICLE_DAMAGE)),
-        "sub": (pack_bonus(on_vals["sub"], STAT_VEHICLE_DAMAGE), pack_bonus(off_vals["sub"], STAT_VEHICLE_DAMAGE)),
-        "mech": (pack_bonus(on_vals["mech"], STAT_VEHICLE_DAMAGE), pack_bonus(off_vals["mech"], STAT_VEHICLE_DAMAGE)),
-        "advBonus": (pack_bonus(on_vals["advBonus"], STAT_MINING_BONUS), pack_bonus(off_vals["advBonus"], STAT_MINING_BONUS)),
+        "player_on": player_on,
+        "player_off": player_off,
+        "prefix": player_prefix,
+        "spd_on": pack_bonus(on_vals["laserSpd"], STAT_MINING_SPEED),
+        "spd_off": pack_bonus(off_vals["laserSpd"], STAT_MINING_SPEED),
+        "spd_strong_off": pack_bonus(off_vals["strongSpd"], STAT_MINING_SPEED),
+        "veh": pack_bonus(on_vals["veh"], STAT_VEHICLE_DAMAGE),
+        "veh_off": pack_bonus(off_vals["veh"], STAT_VEHICLE_DAMAGE),
+        "sub": pack_bonus(on_vals["sub"], STAT_VEHICLE_DAMAGE),
+        "sub_off": pack_bonus(off_vals["sub"], STAT_VEHICLE_DAMAGE),
+        "mech": pack_bonus(on_vals["mech"], STAT_VEHICLE_DAMAGE),
+        "mech_off": pack_bonus(off_vals["mech"], STAT_VEHICLE_DAMAGE),
+        "adv": pack_bonus(on_vals["advBonus"], STAT_MINING_BONUS),
+        "adv_off": pack_bonus(off_vals["advBonus"], STAT_MINING_BONUS),
     }
-    print("正在扫描 NMS 内存…")
-    for base, blob in scan_writable(handle):
-        start = 0
-        while True:
-            pos = blob.find(player_prefix, start)
-            if pos < 0:
-                break
-            if blob[pos + 16 : pos + 28] == player_mid:
-                targets["rate"] = base + pos + 12
-                targets["mult"] = base + pos + 28
-            start = pos + 1
-        speed_hits.extend(find_all(blob, spd_on, base))
-        speed_hits.extend(find_all(blob, spd_off, base))
-        speed_hits.extend(find_all(blob, pack_bonus(off_vals["strongSpd"], STAT_MINING_SPEED), base))
-        for key, (pat_on, pat_off) in patterns.items():
-            bonus_hits[key].extend(find_all(blob, pat_on, base))
-            bonus_hits[key].extend(find_all(blob, pat_off, base))
-    if "rate" not in targets:
-        return {}
-    for addr in speed_hits:
+    found: dict[str, list[int]] = {key: [] for key in patterns}
+    scanned = 0
+    print("正在扫描 NMS 内存（单遍分块，含大堆）…", flush=True)
+    for base, blob in iter_chunks(handle):
+        scanned += len(blob)
+        for key, pat in patterns.items():
+            if len(found[key]) >= 16:
+                continue
+            start = 0
+            while True:
+                pos = blob.find(pat, start)
+                if pos < 0:
+                    break
+                found[key].append(base + pos)
+                start = pos + 1
+    print(f"  已扫 {scanned / 1024 / 1024:.0f} MB", flush=True)
+
+    targets: dict[str, int] = {}
+    player_hits = found["player_on"] or found["player_off"]
+    if not player_hits:
+        for addr in found["prefix"]:
+            mid = read_mem(handle, addr + 16, 12)
+            if mid == player_mid:
+                player_hits.append(addr)
+    if player_hits:
+        addr = player_hits[0]
+        targets["rate"] = addr + 12
+        targets["mult"] = addr + 28
+        print(f"  玩家全局 @ {addr:#x} 副本={len(player_hits)}", flush=True)
+
+    for addr in sorted(set(found["spd_on"] + found["spd_off"] + found["spd_strong_off"])):
         nxt = read_mem(handle, addr + 12, 12)
         if nxt == heat:
             targets["laserSpd"] = addr
@@ -273,10 +332,21 @@ def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float]) -
             targets["laserBonus"] = addr + 60
         elif "strongSpd" not in targets:
             targets["strongSpd"] = addr
-    for key, hits in bonus_hits.items():
-        uniq = sorted(set(hits))
-        if len(uniq) == 1:
-            targets[key] = uniq[0]
+    if "laserDmg" in targets:
+        print(f"  采矿激光 @ {targets['laserSpd']:#x}", flush=True)
+
+    for key, on_key, off_key in (
+        ("veh", "veh", "veh_off"),
+        ("sub", "sub", "sub_off"),
+        ("mech", "mech", "mech_off"),
+        ("advBonus", "adv", "adv_off"),
+    ):
+        uniq = sorted(set(found[on_key] or found[off_key]))
+        if not uniq:
+            continue
+        targets[key] = uniq[0]
+        extra = f"（{len(uniq)} 处，用第一处）" if len(uniq) > 1 else ""
+        print(f"  {key} @ {uniq[0]:#x}{extra}", flush=True)
     return targets
 
 
@@ -324,11 +394,17 @@ def beep(enabled: bool) -> None:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     on_vals, off_vals, hotkey = load_values()
     vk = VK_MAP.get(hotkey)
     if vk is None:
         print(f"不支持的热键 {hotkey}，请改成 F1-F12")
         return 1
+    once = "--once" in sys.argv
     print("NMS 瞬间采集开关")
     print(f"  热键：{hotkey}（仅游戏窗口前台）")
     print("  Ctrl+C 退出。进档后再按一次热键会重新扫描。")
@@ -340,6 +416,9 @@ def main() -> int:
     try:
         while True:
             cur = find_pid(PROCESS_NAME)
+            if once and not cur:
+                print("未找到 NMS.exe")
+                return 1
             if cur != pid:
                 if handle:
                     kernel32.CloseHandle(handle)
@@ -351,12 +430,14 @@ def main() -> int:
                     if handle:
                         print(f"已附加 NMS.exe PID={pid}，扫描中")
                         targets = locate(handle, on_vals, off_vals)
-                        if targets.get("rate") and targets.get("laserDmg"):
+                        if targets.get("rate"):
                             enabled = detect_enabled(handle, targets, on_vals, off_vals)
                             print(f"定位成功，当前瞬间采集：{'开' if enabled else '关'}")
                             print("  字段：", ", ".join(sorted(targets)))
                         else:
                             print("还没扫到采矿字段。进存档后再按热键。")
+                        if once:
+                            return 0 if targets.get("rate") else 2
                     else:
                         print("OpenProcess 失败")
             down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
