@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import ctypes
+import json
 import struct
 import sys
 import time
@@ -12,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "CONFIG.ini"
+CACHE_PATH = ROOT / "instantmine_toggle.cache.json"
 PROCESS_NAME = "NMS.exe"
 
 PROCESS_VM_READ = 0x0010
@@ -27,6 +29,13 @@ READABLE = WRITABLE | 0x02 | 0x20 | 0x10
 CHUNK = 2 * 1024 * 1024
 CHUNK_OVERLAP = 64
 PAGE_READWRITE = 0x04
+PAGE_WRITECOMBINE = 0x400
+MEM_IMAGE = 0x1000000
+MEM_MAPPED = 0x40000
+MEM_PRIVATE = 0x20000
+TH32CS_SNAPMODULE = 0x08
+TH32CS_SNAPMODULE32 = 0x10
+MAX_PRIVATE_SCAN = 48 * 1024 * 1024
 
 STAT_LASER_DAMAGE = 2
 STAT_MINING_SPEED = 3
@@ -99,10 +108,33 @@ class PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
+class MODULEENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("th32ModuleID", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("GlblcntUsage", wintypes.DWORD),
+        ("ProccntUsage", wintypes.DWORD),
+        ("modBaseAddr", ctypes.c_void_p),
+        ("modBaseSize", wintypes.DWORD),
+        ("hModule", wintypes.HMODULE),
+        ("szModule", wintypes.WCHAR * 256),
+        ("szExePath", wintypes.WCHAR * 260),
+    ]
+
+
 kernel32.Process32FirstW.restype = wintypes.BOOL
 kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
 kernel32.Process32NextW.restype = wintypes.BOOL
 kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+kernel32.Module32FirstW.restype = wintypes.BOOL
+kernel32.Module32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32W)]
+kernel32.Module32NextW.restype = wintypes.BOOL
+kernel32.Module32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32W)]
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+]
 
 
 def cfg_float(cfg: configparser.ConfigParser, section: str, key: str, default: str) -> float:
@@ -210,18 +242,129 @@ def read_float(handle: int, addr: int) -> float | None:
     return struct.unpack("<f", raw)[0]
 
 
-def find_all(blob: bytes, pattern: bytes, base: int) -> list[int]:
-    hits = []
-    start = 0
-    while True:
-        pos = blob.find(pattern, start)
-        if pos < 0:
-            return hits
-        hits.append(base + pos)
-        start = pos + 1
+def exe_identity(handle: int) -> tuple[str, int, float]:
+    buf = ctypes.create_unicode_buffer(32768)
+    size = wintypes.DWORD(32768)
+    if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+        return "", 0, 0.0
+    path = Path(buf.value)
+    try:
+        st = path.stat()
+        return str(path), int(st.st_size), float(st.st_mtime)
+    except OSError:
+        return str(path), 0, 0.0
 
 
-def iter_chunks(handle: int):
+def list_modules(pid: int) -> list[tuple[str, int, int]]:
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
+    if snap in (0, INVALID_HANDLE_VALUE):
+        return []
+    mods: list[tuple[str, int, int]] = []
+    try:
+        entry = MODULEENTRY32W()
+        entry.dwSize = ctypes.sizeof(MODULEENTRY32W)
+        if not kernel32.Module32FirstW(snap, ctypes.byref(entry)):
+            return []
+        while True:
+            base = int(entry.modBaseAddr or 0)
+            mods.append((entry.szModule, base, int(entry.modBaseSize)))
+            if not kernel32.Module32NextW(snap, ctypes.byref(entry)):
+                break
+    finally:
+        kernel32.CloseHandle(snap)
+    return mods
+
+
+def module_of(addr: int, modules: list[tuple[str, int, int]]) -> tuple[str, int] | None:
+    for name, base, size in modules:
+        if base <= addr < base + size:
+            return name, addr - base
+    return None
+
+
+def load_cache() -> dict:
+    if not CACHE_PATH.exists():
+        return {}
+    try:
+        return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_cache(payload: dict) -> None:
+    CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_cached(
+    handle: int,
+    pid: int,
+    modules: list[tuple[str, int, int]],
+    on_vals: dict[str, float],
+    off_vals: dict[str, float],
+) -> dict[str, int]:
+    cache = load_cache()
+    if not cache:
+        return {}
+    exe_path, exe_size, exe_mtime = exe_identity(handle)
+    if cache.get("exe_size") != exe_size:
+        return {}
+    if abs(float(cache.get("exe_mtime") or 0) - exe_mtime) > 1:
+        return {}
+    by_name = {name.lower(): (base, size) for name, base, size in modules}
+    targets: dict[str, int] = {}
+    same_pid = cache.get("pid") == pid
+    for key, meta in (cache.get("fields") or {}).items():
+        module = (meta.get("module") or "").lower()
+        rva = int(meta.get("rva") or 0)
+        if module and module in by_name:
+            addr = by_name[module][0] + rva
+        elif same_pid:
+            addr = int(meta.get("abs") or 0)
+        else:
+            continue
+        if not addr:
+            continue
+        val = read_float(handle, addr)
+        if val is None:
+            return {}
+        expected = []
+        if key == "strongSpd":
+            expected = [on_vals["laserSpd"], off_vals["strongSpd"]]
+        elif key in on_vals and key in off_vals:
+            expected = [on_vals[key], off_vals[key]]
+        else:
+            expected = [on_vals.get(key, 0), off_vals.get(key, 0)]
+        if expected and not any(abs(val - exp) < 0.01 for exp in expected):
+            return {}
+        targets[key] = addr
+    if "rate" not in targets or "mult" not in targets:
+        return {}
+    print("  命中缓存，跳过全扫", flush=True)
+    return targets
+
+
+def store_cache(handle: int, pid: int, modules: list[tuple[str, int, int]], targets: dict[str, int]) -> None:
+    exe_path, exe_size, exe_mtime = exe_identity(handle)
+    fields = {}
+    for key, addr in targets.items():
+        info = module_of(addr, modules)
+        if info:
+            fields[key] = {"module": info[0], "rva": info[1], "abs": addr}
+        else:
+            fields[key] = {"module": "", "rva": 0, "abs": addr}
+    save_cache(
+        {
+            "version": 1,
+            "exe_path": exe_path,
+            "exe_size": exe_size,
+            "exe_mtime": exe_mtime,
+            "pid": pid,
+            "fields": fields,
+        }
+    )
+
+
+def iter_chunks(handle: int, mem_types: tuple[int, ...] | None = None, max_private: int = MAX_PRIVATE_SCAN):
     mbi = MEMORY_BASIC_INFORMATION()
     address = 0
     while True:
@@ -236,7 +379,14 @@ def iter_chunks(handle: int):
         address = nxt
         if mbi.State != MEM_COMMIT or (mbi.Protect & PAGE_GUARD) or (mbi.Protect & PAGE_NOACCESS):
             continue
+        if mbi.Protect & PAGE_WRITECOMBINE:
+            continue
         if not (mbi.Protect & READABLE):
+            continue
+        region_type = int(mbi.Type)
+        if mem_types and not any(region_type == t for t in mem_types):
+            continue
+        if region_type == MEM_PRIVATE and size > max_private:
             continue
         off = 0
         while off < size:
@@ -251,28 +401,38 @@ def iter_chunks(handle: int):
             off += nread - CHUNK_OVERLAP
 
 
-def find_pattern(handle: int, pattern: bytes, limit: int = 32) -> list[int]:
-    hits: list[int] = []
-    if not pattern:
-        return hits
-    seen: set[int] = set()
-    for base, blob in iter_chunks(handle):
-        start = 0
-        while True:
-            pos = blob.find(pattern, start)
-            if pos < 0:
-                break
-            addr = base + pos
-            if addr not in seen:
-                seen.add(addr)
-                hits.append(addr)
-                if len(hits) >= limit:
-                    return hits
-            start = pos + 1
-    return hits
+def scan_patterns(handle: int, patterns: dict[str, bytes], mem_types: tuple[int, ...], label: str) -> dict[str, list[int]]:
+    found: dict[str, list[int]] = {key: [] for key in patterns}
+    scanned = 0
+    print(f"  {label}…", flush=True)
+    for base, blob in iter_chunks(handle, mem_types):
+        scanned += len(blob)
+        for key, pat in patterns.items():
+            if len(found[key]) >= 8:
+                continue
+            start = 0
+            while True:
+                pos = blob.find(pat, start)
+                if pos < 0:
+                    break
+                found[key].append(base + pos)
+                start = pos + 1
+        if found["player_on"] or found["player_off"]:
+            if scanned > 8 * 1024 * 1024:
+                have_tech = found["spd_on"] or found["veh"] or found["sub"] or found["mech"]
+                if have_tech:
+                    break
+    print(f"    已扫 {scanned / 1024 / 1024:.0f} MB", flush=True)
+    return found
 
 
-def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float]) -> dict[str, int]:
+def merge_found(dst: dict[str, list[int]], src: dict[str, list[int]]) -> None:
+    for key, hits in src.items():
+        dst.setdefault(key, [])
+        dst[key].extend(hits)
+
+
+def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float], pid: int = 0) -> dict[str, int]:
     player_prefix = pack_f(0.04) + pack_f(1.5) + pack_f(1.0)
     player_mid = pack_f(2.0) + pack_f(0.4) + pack_f(0.1)
     heat = pack_bonus(on_vals["heat"], STAT_HEAT_TIME)
@@ -294,22 +454,18 @@ def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float]) -
         "adv": pack_bonus(on_vals["advBonus"], STAT_MINING_BONUS),
         "adv_off": pack_bonus(off_vals["advBonus"], STAT_MINING_BONUS),
     }
+    modules = list_modules(pid) if pid else []
+    cached = resolve_cached(handle, pid, modules, on_vals, off_vals) if pid else {}
+    if cached:
+        return cached
+
     found: dict[str, list[int]] = {key: [] for key in patterns}
-    scanned = 0
-    print("正在扫描 NMS 内存（单遍分块，含大堆）…", flush=True)
-    for base, blob in iter_chunks(handle):
-        scanned += len(blob)
-        for key, pat in patterns.items():
-            if len(found[key]) >= 16:
-                continue
-            start = 0
-            while True:
-                pos = blob.find(pat, start)
-                if pos < 0:
-                    break
-                found[key].append(base + pos)
-                start = pos + 1
-    print(f"  已扫 {scanned / 1024 / 1024:.0f} MB", flush=True)
+    print("正在扫描 NMS 内存（先模块/映射，再小堆）…", flush=True)
+    merge_found(found, scan_patterns(handle, patterns, (MEM_IMAGE,), "模块"))
+    if not (found["player_on"] or found["player_off"]):
+        merge_found(found, scan_patterns(handle, patterns, (MEM_MAPPED,), "映射文件"))
+    if not (found["player_on"] or found["player_off"]):
+        merge_found(found, scan_patterns(handle, patterns, (MEM_PRIVATE,), "小堆"))
 
     targets: dict[str, int] = {}
     player_hits = found["player_on"] or found["player_off"]
@@ -347,6 +503,8 @@ def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float]) -
         targets[key] = uniq[0]
         extra = f"（{len(uniq)} 处，用第一处）" if len(uniq) > 1 else ""
         print(f"  {key} @ {uniq[0]:#x}{extra}", flush=True)
+    if pid and "rate" in targets:
+        store_cache(handle, pid, modules, targets)
     return targets
 
 
@@ -428,8 +586,8 @@ def main() -> int:
                 if pid:
                     handle = kernel32.OpenProcess(PROCESS_RIGHTS, False, pid)
                     if handle:
-                        print(f"已附加 NMS.exe PID={pid}，扫描中")
-                        targets = locate(handle, on_vals, off_vals)
+                        print(f"已附加 NMS.exe PID={pid}")
+                        targets = locate(handle, on_vals, off_vals, pid)
                         if targets.get("rate"):
                             enabled = detect_enabled(handle, targets, on_vals, off_vals)
                             print(f"定位成功，当前瞬间采集：{'开' if enabled else '关'}")
@@ -444,7 +602,7 @@ def main() -> int:
             if down and not was_down and pid and nms_foreground(pid):
                 if not handle or not targets.get("rate"):
                     if handle:
-                        targets = locate(handle, on_vals, off_vals)
+                        targets = locate(handle, on_vals, off_vals, pid)
                     if not targets.get("rate"):
                         print("未定位，先进入存档再按")
                     else:
