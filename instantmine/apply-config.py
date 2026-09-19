@@ -1,6 +1,6 @@
 """从当前 NMS 版本原始 MBIN 构建「瞬间采集」替换模组。
 
-只改采集相关字段，不改喷气背包。游戏更新后重新运行即可。
+采集伤害/速度 + 合并 nooverheat 的武器过热补丁。不改喷气背包。
 """
 
 from __future__ import annotations
@@ -8,13 +8,20 @@ from __future__ import annotations
 import configparser
 import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+NOOVERHEAT_ROOT = ROOT.parent / "nooverheat"
+if str(NOOVERHEAT_ROOT) not in sys.path:
+    sys.path.insert(0, str(NOOVERHEAT_ROOT))
+from heat import apply_heat_globals, apply_heat_tech  # noqa: E402
+
 GAME_ROOT = Path(r"D:\Games\steam\steamapps\common\No Man's Sky")
 GAME_MODS = GAME_ROOT / "GAMEDATA" / "MODS"
 GAME_MOD = GAME_MODS / "zhanh_InstantMine"
+NOOVERHEAT_MOD = GAME_MODS / "zhanh_NoOverheat"
 OLD_COMBINED_MODS = (
     GAME_MODS / "zhanh_CreativeFly_InstantMine",
     GAME_MODS / "ZHANH_CREATIVEFLY_INSTANTMINE",
@@ -50,6 +57,32 @@ def cfg_get(cfg: configparser.ConfigParser, section: str, key: str, default: str
     if cfg.has_option(section, key):
         return cfg.get(section, key).strip()
     return default
+
+
+def load_heat_cfg() -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    ini = NOOVERHEAT_ROOT / "CONFIG.ini"
+    if ini.exists():
+        cfg.read(ini, encoding="utf-8")
+    return cfg
+
+
+def heat_kwargs(mining_cfg: configparser.ConfigParser) -> dict[str, str]:
+    heat_cfg = load_heat_cfg()
+    return {
+        "heat_time": cfg_get(
+            heat_cfg,
+            "Overheat",
+            "HeatTime",
+            cfg_get(mining_cfg, "Mining", "LaserHeatTime", "9999"),
+        ),
+        "alert_time": cfg_get(heat_cfg, "Overheat", "HeatAlertTime", "9999"),
+        "damage_boost": cfg_get(heat_cfg, "Overheat", "HeatDamageBoost", "0"),
+        "decay": cfg_get(heat_cfg, "Overheat", "OverheatDecay", "0.01"),
+        "generosity": cfg_get(heat_cfg, "Overheat", "OverheatGenerosity", "9999"),
+        "cool_time": cfg_get(heat_cfg, "Overheat", "ShipCoolTime", "0.01"),
+        "projectile_pool": cfg_get(heat_cfg, "Overheat", "ProjectileHeatPool", "9999"),
+    }
 
 
 def run_checked(args: list[str | Path], cwd: Path | None = None) -> None:
@@ -191,14 +224,16 @@ def build_gameplay_globals(cfg: configparser.ConfigParser, report: list[str]) ->
     )
     tree = ET.parse(mxml)
     root = tree.getroot()
-    # 只改采矿激光基础过热时间。HeatAlertTime / HeatDamageBoost 是全局过热条，
-    # 动了会让脉冲枪等武器的过热提示和过热加成一起坏掉。
-    values = {
-        "BaseLaserHeatTime": cfg_get(cfg, "Mining", "LaserHeatTime", "9999"),
-    }
-    report.append("== GCGAMEPLAYGLOBALS ==")
-    for name, value in values.items():
-        set_direct_value(root, name, value, report)
+    params = heat_kwargs(cfg)
+    apply_heat_globals(
+        root,
+        report,
+        heat_time=params["heat_time"],
+        alert_time=params["alert_time"],
+        damage_boost=params["damage_boost"],
+        decay=params["decay"],
+        generosity=params["generosity"],
+    )
     write_xml(tree, mxml)
     output = ROOT / "GCGAMEPLAYGLOBALS.GLOBAL.MBIN"
     compile_mxml(mxml, output, "gameplay")
@@ -236,6 +271,14 @@ def build_technology_table(cfg: configparser.ConfigParser, report: list[str]) ->
             if tech_id == "UT_MINER" and stat_type == "Weapon_Laser_MiningBonus":
                 value = cfg_get(cfg, "Mining", "AdvancedLaserMiningBonus", "20")
             set_stat_bonus(technology, stat_type, value, report)
+    params = heat_kwargs(cfg)
+    apply_heat_tech(
+        root,
+        report,
+        heat_time=params["heat_time"],
+        cool_time=params["cool_time"],
+        projectile_pool=params["projectile_pool"],
+    )
     write_xml(tree, mxml)
     output = ROOT / "METADATA" / "REALITY" / "TABLES" / "NMS_REALITY_GCTECHNOLOGYTABLE.MBIN"
     compile_mxml(mxml, output, "technology")
@@ -272,6 +315,28 @@ def copy_into_game(files: list[Path]) -> None:
     missing = [str(path) for path in expected if not path.exists()]
     if missing:
         raise RuntimeError("构建完成但缺少游戏替换文件：\n" + "\n".join(missing))
+    strip_nooverheat_overlap()
+
+
+def strip_nooverheat_overlap() -> None:
+    """两份科技表不能共存。瞬间采集已含不过热，拆掉独立包里的重复 MBIN。"""
+    if not NOOVERHEAT_MOD.exists():
+        return
+    removed = False
+    for rel in (
+        Path("GCGAMEPLAYGLOBALS.GLOBAL.MBIN"),
+        Path("METADATA") / "REALITY" / "TABLES" / "NMS_REALITY_GCTECHNOLOGYTABLE.MBIN",
+    ):
+        target = NOOVERHEAT_MOD / rel
+        if target.exists():
+            target.unlink()
+            removed = True
+    if removed:
+        note = NOOVERHEAT_MOD / "SKIPPED_OVERLAP.txt"
+        note.write_text(
+            "瞬间采集已合并不过热补丁，已删除本目录重复 MBIN，避免盖掉采矿伤害。\n",
+            encoding="utf-8",
+        )
 
 
 def main() -> None:

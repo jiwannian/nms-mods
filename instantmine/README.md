@@ -1,6 +1,6 @@
 # 瞬间采集
 
-采矿激光打到的矿物、植物、晶体、矿脉立刻碎掉掉落；载具、潜艇、机甲激光同样加快；采矿激光几乎不过热。不改脉冲枪等其它武器的过热条。
+采矿激光打到的矿物、植物、晶体、矿脉立刻碎掉掉落；载具、潜艇、机甲激光同样加快。构建时会合并隔壁 `nooverheat/` 的过热补丁：手持、载具、飞船武器也几乎不过热。若只要瞬采、武器仍要过热，不要用当前构建。
 
 不改喷气背包，不含任何按键脚本。
 
@@ -30,7 +30,7 @@
 | `LaserMiningBonus` | 基础激光采矿加成 | 1 |
 | `AdvancedLaserMiningBonus` | 高级采矿模组加成 | 1.5 |
 
-Cosmos 7.03 中 `STRONGLASER` 只保留采矿速度字段，伤害和过热在基础 `LASER` 上；脚本会跳过当前版本不存在的字段。`MECH_LASER` 与载具激光使用同一套伤害/过热。不改 `HeatAlertTime` / `HeatDamageBoost`，避免波及所有会过热的武器。
+Cosmos 7.03 中 `STRONGLASER` 只保留采矿速度字段，伤害和过热在基础 `LASER` 上；脚本会跳过当前版本不存在的字段。`MECH_LASER` 与载具激光使用同一套伤害/过热。过热全局条（`HeatAlertTime` / `HeatDamageBoost` 等）由 `nooverheat/heat.py` 一并改掉，避免两份科技表互盖。已装独立 `zhanh_NoOverheat` 时会拆掉它的重复 MBIN。
 
 ## 卸载
 

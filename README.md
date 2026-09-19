@@ -8,8 +8,9 @@
 
 | 目录 | 功能 | 游戏内文件夹 |
 | --- | --- | --- |
-| [`instantmine/`](instantmine/) | 采矿激光瞬间采集，几乎不过热 | `zhanh_InstantMine` |
+| [`instantmine/`](instantmine/) | 采矿激光瞬间采集；构建会合并武器不过热 | `zhanh_InstantMine` |
 | [`unlimitedstacks/`](unlimitedstacks/) | 物质堆叠 99999999；产品格子原版，硬顶 99999999 以免建造 UI 溢出 | `zhanh_UnlimitedStacks` |
+| [`nooverheat/`](nooverheat/) | 手持/载具/飞船武器不过热。已装瞬间采集时跳过重复 MBIN | `zhanh_NoOverheat` |
 
 以后新增的 mod 会继续以同级子目录加入。
 
@@ -47,6 +48,12 @@ MBINCompiler 必须与当前游戏大版本对齐（例如 7.03 用 `v7.03.x`）
 │   ├── apply-config.py
 │   ├── apply-config.ps1
 │   ├── CONFIG.ini
+│   └── README.md
+├── nooverheat/            # 武器不过热
+│   ├── apply-config.py
+│   ├── apply-config.ps1
+│   ├── CONFIG.ini
+│   ├── heat.py            # 瞬间采集会 import 同一套补丁
 │   └── README.md
 └── <下一个 mod>/
 ```
