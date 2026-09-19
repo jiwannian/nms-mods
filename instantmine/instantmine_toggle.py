@@ -306,9 +306,13 @@ def resolve_cached(
     if not cache:
         return {}
     exe_path, exe_size, exe_mtime = exe_identity(handle)
+    if cache.get("version") != 2:
+        return {}
     if cache.get("exe_size") != exe_size:
         return {}
     if abs(float(cache.get("exe_mtime") or 0) - exe_mtime) > 1:
+        return {}
+    if "strongSpd" in (cache.get("fields") or {}):
         return {}
     by_name = {name.lower(): (base, size) for name, base, size in modules}
     targets: dict[str, int] = {}
@@ -354,7 +358,7 @@ def store_cache(handle: int, pid: int, modules: list[tuple[str, int, int]], targ
             fields[key] = {"module": "", "rva": 0, "abs": addr}
     save_cache(
         {
-            "version": 1,
+            "version": 2,
             "exe_path": exe_path,
             "exe_size": exe_size,
             "exe_mtime": exe_mtime,
@@ -417,11 +421,10 @@ def scan_patterns(handle: int, patterns: dict[str, bytes], mem_types: tuple[int,
                     break
                 found[key].append(base + pos)
                 start = pos + 1
-        if found["player_on"] or found["player_off"]:
-            if scanned > 8 * 1024 * 1024:
-                have_tech = found["spd_on"] or found["veh"] or found["sub"] or found["mech"]
-                if have_tech:
-                    break
+        if (found.get("player_on") or found.get("player_off")) and (
+            found.get("laser_on") or found.get("laser_off")
+        ):
+            break
     print(f"    已扫 {scanned / 1024 / 1024:.0f} MB", flush=True)
     return found
 
@@ -435,24 +438,29 @@ def merge_found(dst: dict[str, list[int]], src: dict[str, list[int]]) -> None:
 def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float], pid: int = 0) -> dict[str, int]:
     player_prefix = pack_f(0.04) + pack_f(1.5) + pack_f(1.0)
     player_mid = pack_f(2.0) + pack_f(0.4) + pack_f(0.1)
-    heat = pack_bonus(on_vals["heat"], STAT_HEAT_TIME)
     player_on = player_prefix + pack_f(on_vals["rate"]) + player_mid + pack_f(on_vals["mult"])
     player_off = player_prefix + pack_f(off_vals["rate"]) + player_mid + pack_f(off_vals["mult"])
+    laser_on = (
+        pack_bonus(on_vals["laserSpd"], STAT_MINING_SPEED)
+        + pack_bonus(on_vals["heat"], STAT_HEAT_TIME)
+        + pack_bonus(on_vals["laserDmg"], STAT_LASER_DAMAGE)
+    )
+    laser_off = (
+        pack_bonus(off_vals["laserSpd"], STAT_MINING_SPEED)
+        + pack_bonus(on_vals["heat"], STAT_HEAT_TIME)
+        + pack_bonus(off_vals["laserDmg"], STAT_LASER_DAMAGE)
+    )
     patterns = {
         "player_on": player_on,
         "player_off": player_off,
-        "prefix": player_prefix,
-        "spd_on": pack_bonus(on_vals["laserSpd"], STAT_MINING_SPEED),
-        "spd_off": pack_bonus(off_vals["laserSpd"], STAT_MINING_SPEED),
-        "spd_strong_off": pack_bonus(off_vals["strongSpd"], STAT_MINING_SPEED),
+        "laser_on": laser_on,
+        "laser_off": laser_off,
         "veh": pack_bonus(on_vals["veh"], STAT_VEHICLE_DAMAGE),
         "veh_off": pack_bonus(off_vals["veh"], STAT_VEHICLE_DAMAGE),
         "sub": pack_bonus(on_vals["sub"], STAT_VEHICLE_DAMAGE),
         "sub_off": pack_bonus(off_vals["sub"], STAT_VEHICLE_DAMAGE),
         "mech": pack_bonus(on_vals["mech"], STAT_VEHICLE_DAMAGE),
         "mech_off": pack_bonus(off_vals["mech"], STAT_VEHICLE_DAMAGE),
-        "adv": pack_bonus(on_vals["advBonus"], STAT_MINING_BONUS),
-        "adv_off": pack_bonus(off_vals["advBonus"], STAT_MINING_BONUS),
     }
     modules = list_modules(pid) if pid else []
     cached = resolve_cached(handle, pid, modules, on_vals, off_vals) if pid else {}
@@ -462,40 +470,37 @@ def locate(handle: int, on_vals: dict[str, float], off_vals: dict[str, float], p
     found: dict[str, list[int]] = {key: [] for key in patterns}
     print("正在扫描 NMS 内存（先模块/映射，再小堆）…", flush=True)
     merge_found(found, scan_patterns(handle, patterns, (MEM_IMAGE,), "模块"))
-    if not (found["player_on"] or found["player_off"]):
+    need_player = not (found["player_on"] or found["player_off"])
+    need_laser = not (found["laser_on"] or found["laser_off"])
+    if need_player or need_laser:
         merge_found(found, scan_patterns(handle, patterns, (MEM_MAPPED,), "映射文件"))
-    if not (found["player_on"] or found["player_off"]):
+        need_player = not (found["player_on"] or found["player_off"])
+        need_laser = not (found["laser_on"] or found["laser_off"])
+    if need_player or need_laser:
         merge_found(found, scan_patterns(handle, patterns, (MEM_PRIVATE,), "小堆"))
 
     targets: dict[str, int] = {}
     player_hits = found["player_on"] or found["player_off"]
-    if not player_hits:
-        for addr in found["prefix"]:
-            mid = read_mem(handle, addr + 16, 12)
-            if mid == player_mid:
-                player_hits.append(addr)
     if player_hits:
         addr = player_hits[0]
         targets["rate"] = addr + 12
         targets["mult"] = addr + 28
         print(f"  玩家全局 @ {addr:#x} 副本={len(player_hits)}", flush=True)
 
-    for addr in sorted(set(found["spd_on"] + found["spd_off"] + found["spd_strong_off"])):
-        nxt = read_mem(handle, addr + 12, 12)
-        if nxt == heat:
-            targets["laserSpd"] = addr
-            targets["laserDmg"] = addr + 24
+    laser_hits = found["laser_on"] or found["laser_off"]
+    if laser_hits:
+        addr = laser_hits[0]
+        targets["laserSpd"] = addr
+        targets["laserDmg"] = addr + 24
+        drain = read_mem(handle, addr + 48, 12)
+        if drain and struct.unpack("<fII", drain)[2] == 8:
             targets["laserBonus"] = addr + 60
-        elif "strongSpd" not in targets:
-            targets["strongSpd"] = addr
-    if "laserDmg" in targets:
-        print(f"  采矿激光 @ {targets['laserSpd']:#x}", flush=True)
+        print(f"  采矿激光 @ {addr:#x} 副本={len(laser_hits)}", flush=True)
 
     for key, on_key, off_key in (
         ("veh", "veh", "veh_off"),
         ("sub", "sub", "sub_off"),
         ("mech", "mech", "mech_off"),
-        ("advBonus", "adv", "adv_off"),
     ):
         uniq = sorted(set(found[on_key] or found[off_key]))
         if not uniq:
@@ -515,6 +520,20 @@ def detect_enabled(handle: int, targets: dict[str, int], on_vals: dict[str, floa
     return abs(rate - on_vals["rate"]) < abs(rate - off_vals["rate"])
 
 
+def bonus_stat_ok(handle: int, addr: int, stat: int) -> bool:
+    raw = read_mem(handle, addr, 12)
+    if raw is None:
+        return False
+    _bonus, level, got = struct.unpack("<fII", raw)
+    return got == stat and level == 1
+
+
+def player_fields_ok(handle: int, rate_addr: int) -> bool:
+    prefix = read_mem(handle, rate_addr - 12, 12)
+    mid = read_mem(handle, rate_addr + 4, 12)
+    return prefix == pack_f(0.04) + pack_f(1.5) + pack_f(1.0) and mid == pack_f(2.0) + pack_f(0.4) + pack_f(0.1)
+
+
 def apply_state(
     handle: int,
     enabled: bool,
@@ -523,27 +542,31 @@ def apply_state(
     off_vals: dict[str, float],
 ) -> bool:
     vals = on_vals if enabled else off_vals
-    mapping = [
-        ("rate", vals["rate"]),
-        ("mult", vals["mult"]),
-        ("laserSpd", vals["laserSpd"]),
-        ("laserDmg", vals["laserDmg"]),
-        ("laserBonus", vals["laserBonus"]),
-        ("veh", vals["veh"]),
-        ("sub", vals["sub"]),
-        ("mech", vals["mech"]),
-        ("advBonus", vals["advBonus"]),
-    ]
     ok = True
-    for key, value in mapping:
+    rate_addr = targets.get("rate")
+    if rate_addr and player_fields_ok(handle, rate_addr):
+        ok = write_float(handle, rate_addr, vals["rate"]) and ok
+        ok = write_float(handle, targets["mult"], vals["mult"]) and ok
+    elif rate_addr:
+        print("  跳过玩家全局：周围特征已对不上")
+        ok = False
+    stat_of = {
+        "laserSpd": STAT_MINING_SPEED,
+        "laserDmg": STAT_LASER_DAMAGE,
+        "laserBonus": STAT_MINING_BONUS,
+        "veh": STAT_VEHICLE_DAMAGE,
+        "sub": STAT_VEHICLE_DAMAGE,
+        "mech": STAT_VEHICLE_DAMAGE,
+    }
+    for key, stat in stat_of.items():
         addr = targets.get(key)
         if not addr:
             continue
-        ok = write_float(handle, addr, value) and ok
-    strong = targets.get("strongSpd")
-    if strong:
-        spd = on_vals["laserSpd"] if enabled else off_vals["strongSpd"]
-        ok = write_float(handle, strong, spd) and ok
+        if not bonus_stat_ok(handle, addr, stat):
+            print(f"  跳过 {key}：Stat 对不上，避免写坏光束")
+            ok = False
+            continue
+        ok = write_float(handle, addr, vals[key]) and ok
     return ok
 
 
